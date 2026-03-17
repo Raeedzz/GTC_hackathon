@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   createFireGrid,
   latLonToGrid,
-  simulateFire,
+  getSpreadProbability,
   calculateDamageReport,
 } from '@/lib/damageModel';
 
@@ -12,43 +12,58 @@ export default function useFireSimulation() {
   const [fireGrid, setFireGrid] = useState(null);
   const [damage, setDamage] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
+  const intervalRef = useRef(null);
 
-  const startFire = useCallback((latlng, bounds, weather, markers) => {
+  /**
+   * Start fire from one or more ignition points.
+   * @param {Array} ignitionPoints - Array of {lat, lng} or {lat, lon}
+   * @param {Object} bounds - { north, south, east, west }
+   * @param {Object} weather
+   * @param {Object} markers
+   * @param {Object|null} terrain
+   */
+  const startFire = useCallback((ignitionPoints, bounds, weather, markers, terrain) => {
     setIsSimulating(true);
 
-    const grid = createFireGrid(bounds);
-    const { row, col } = latLonToGrid(latlng.lat, latlng.lng, bounds);
+    // Normalize to array
+    const points = Array.isArray(ignitionPoints) ? ignitionPoints : [ignitionPoints];
 
-    // Animate fire spread
+    const GRID_SIZE = 50;
+    let currentGrid = createFireGrid(bounds);
+
+    // Ignite all points
+    for (const pt of points) {
+      const lat = pt.lat;
+      const lon = pt.lng ?? pt.lon;
+      const { row, col } = latLonToGrid(lat, lon, bounds);
+      currentGrid[row][col] = 1;
+    }
+
     let tick = 0;
     const maxTicks = 30;
-    let currentGrid = grid.map(r => [...r]);
-    currentGrid[row][col] = 1;
 
+    // Fallback values if no terrain
     const windRad = ((weather.wind_direction_degrees || 180) * Math.PI) / 180;
     const windFactor = Math.min((weather.wind_speed || 10) / 30, 1);
     const humidityFactor = 1 - Math.min((weather.humidity || 30) / 100, 0.8);
     const baseSpread = 0.3 * humidityFactor;
 
-    const interval = setInterval(() => {
+    intervalRef.current = setInterval(() => {
       if (tick >= maxTicks) {
-        clearInterval(interval);
-        // Final: all burning -> burned
-        for (let i = 0; i < currentGrid.length; i++) {
+        clearInterval(intervalRef.current);
+        for (let i = 0; i < GRID_SIZE; i++) {
           for (let j = 0; j < currentGrid[i].length; j++) {
             if (currentGrid[i][j] === 1) currentGrid[i][j] = 2;
           }
         }
         setFireGrid([...currentGrid.map(r => [...r])]);
-
-        const report = calculateDamageReport(currentGrid, bounds, markers, weather);
+        const report = calculateDamageReport(currentGrid, bounds, markers, weather, terrain);
         setDamage(report);
         setIsSimulating(false);
         return;
       }
 
       const newFires = [];
-      const GRID_SIZE = currentGrid.length;
 
       for (let i = 0; i < GRID_SIZE; i++) {
         for (let j = 0; j < GRID_SIZE; j++) {
@@ -60,9 +75,14 @@ export default function useFireSimulation() {
               if (ni < 0 || ni >= GRID_SIZE || nj < 0 || nj >= GRID_SIZE) continue;
               if (currentGrid[ni][nj] !== 0) continue;
 
-              const angle = Math.atan2(dj, -di);
-              const windAlignment = Math.cos(angle - windRad);
-              const prob = baseSpread + windFactor * 0.3 * Math.max(0, windAlignment);
+              let prob;
+              if (terrain) {
+                prob = getSpreadProbability(i, j, ni, nj, weather, terrain);
+              } else {
+                const angle = Math.atan2(dj, -di);
+                const windAlignment = Math.cos(angle - windRad);
+                prob = baseSpread + windFactor * 0.3 * Math.max(0, windAlignment);
+              }
 
               if (Math.random() < prob) {
                 newFires.push([ni, nj]);
@@ -80,11 +100,10 @@ export default function useFireSimulation() {
       tick++;
       setFireGrid([...currentGrid.map(r => [...r])]);
     }, 100);
-
-    return () => clearInterval(interval);
   }, []);
 
   const reset = useCallback(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
     setFireGrid(null);
     setDamage(null);
     setIsSimulating(false);

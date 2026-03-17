@@ -12,7 +12,6 @@ const MapView = dynamic(() => import('./components/MapView'), { ssr: false });
 
 function generateScatterPoints(bounds, count, seed = 1) {
   const points = [];
-  // Simple seeded random for consistency
   let s = seed;
   const rand = () => {
     s = (s * 16807) % 2147483647;
@@ -21,7 +20,6 @@ function generateScatterPoints(bounds, count, seed = 1) {
 
   const latRange = bounds.north - bounds.south;
   const lonRange = bounds.east - bounds.west;
-  // Cluster towards center
   for (let i = 0; i < count; i++) {
     const lat = bounds.south + latRange * (0.2 + 0.6 * rand());
     const lon = bounds.west + lonRange * (0.2 + 0.6 * rand());
@@ -36,14 +34,17 @@ export default function Home() {
   const [census, setCensus] = useState(null);
   const [weather, setWeather] = useState(null);
   const [infrastructure, setInfrastructure] = useState(null);
+  const [terrain, setTerrain] = useState(null);
+  const [activeFires, setActiveFires] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState('');
   const [flat, setFlat] = useState(false);
 
   // Fire simulation
   const { fireGrid, damage, isSimulating, startFire, reset: resetFire } = useFireSimulation();
 
   // AI simulation
-  const [simState, setSimState] = useState('idle'); // idle, running, complete
+  const [simState, setSimState] = useState('idle');
   const [simLog, setSimLog] = useState([]);
   const [optimalPlan, setOptimalPlan] = useState(null);
   const [improvementCurve, setImprovementCurve] = useState(null);
@@ -70,6 +71,8 @@ export default function Home() {
       setCensus(null);
       setWeather(null);
       setInfrastructure(null);
+      setTerrain(null);
+      setActiveFires([]);
       resetFire();
       resetAnimation();
       setSimState('idle');
@@ -86,6 +89,8 @@ export default function Home() {
     setCensus(null);
     setWeather(null);
     setInfrastructure(null);
+    setTerrain(null);
+    setActiveFires([]);
     resetFire();
     resetAnimation();
     setSimState('idle');
@@ -94,7 +99,8 @@ export default function Home() {
     setImprovementCurve(null);
     setLoading(true);
 
-    // Fetch all data in parallel
+    // Phase 1: Fetch census, weather, infrastructure in parallel
+    setLoadingStatus('Fetching census, weather & infrastructure...');
     const [censusRes, weatherRes, infraRes] = await Promise.allSettled([
       fetch(`/api/census?fips=${c.fips}`).then(r => r.json()),
       fetch(`/api/weather?lat=${c.lat}&lon=${c.lon}`).then(r => r.json()),
@@ -105,24 +111,49 @@ export default function Home() {
     if (weatherRes.status === 'fulfilled') setWeather(weatherRes.value);
     if (infraRes.status === 'fulfilled') setInfrastructure(infraRes.value);
 
+    // Phase 2: Fetch terrain (elevation + slope + fuel) and FIRMS data in parallel
+    setLoadingStatus('Loading terrain elevation & active fire data...');
+    const { north, south, east, west } = c.bounds;
+    const [terrainRes, firmsRes] = await Promise.allSettled([
+      fetch(`/api/terrain?north=${north}&south=${south}&east=${east}&west=${west}`).then(r => r.json()),
+      fetch(`/api/firms?north=${north}&south=${south}&east=${east}&west=${west}&days=2`).then(r => r.json()),
+    ]);
+
+    if (terrainRes.status === 'fulfilled' && !terrainRes.value.error) {
+      setTerrain(terrainRes.value);
+    }
+    if (firmsRes.status === 'fulfilled') {
+      setActiveFires(firmsRes.value.active_fires || []);
+    }
+
     setLoading(false);
+    setLoadingStatus('');
   }, [resetFire, resetAnimation]);
 
-  // Map click -> fire ignition
+  const getMarkers = useCallback(() => ({
+    houses,
+    fire_stations: infrastructure?.fire_stations || [],
+    hospitals: infrastructure?.hospitals || [],
+    police_stations: infrastructure?.police_stations || [],
+    population: census?.population || 0,
+  }), [houses, infrastructure, census]);
+
+  // Map click -> fire ignition from single point
   const handleMapClick = useCallback((latlng) => {
     if (!county || !weather || isSimulating || simState !== 'idle') return;
-    if (fireGrid) return; // Fire already started
+    if (fireGrid) return;
+    startFire([latlng], county.bounds, weather, getMarkers(), terrain);
+  }, [county, weather, isSimulating, simState, fireGrid, terrain, startFire, getMarkers]);
 
-    const markers = {
-      houses,
-      fire_stations: infrastructure?.fire_stations || [],
-      hospitals: infrastructure?.hospitals || [],
-      police_stations: infrastructure?.police_stations || [],
-      population: census?.population || 0,
-    };
+  // Start fire from all FIRMS hotspots
+  const handleStartFromHotspots = useCallback(() => {
+    if (!county || !weather || isSimulating || simState !== 'idle') return;
+    if (fireGrid) return;
+    if (!activeFires || activeFires.length === 0) return;
 
-    startFire(latlng, county.bounds, weather, markers);
-  }, [county, weather, isSimulating, simState, fireGrid, houses, infrastructure, census, startFire]);
+    const ignitionPoints = activeFires.map(f => ({ lat: f.lat, lon: f.lon }));
+    startFire(ignitionPoints, county.bounds, weather, getMarkers(), terrain);
+  }, [county, weather, isSimulating, simState, fireGrid, activeFires, terrain, startFire, getMarkers]);
 
   // Start AI simulation
   const handleStartSim = useCallback(async () => {
@@ -169,12 +200,22 @@ export default function Home() {
             if (msg.type === 'plan_evaluated' || msg.type === 'round_complete') {
               setSimLog(prev => [...prev, msg]);
             }
+            if (msg.type === 'error') {
+              console.warn('AI round error:', msg.message);
+              setSimLog(prev => [...prev, msg]);
+            }
+            if (msg.type === 'fatal_error') {
+              console.error('AI fatal error:', msg.message);
+              setSimState('idle');
+            }
             if (msg.type === 'complete') {
               setOptimalPlan(msg.optimal_plan);
               setImprovementCurve(msg.improvement_curve);
-              setSimState('complete');
+              setSimState(msg.optimal_plan ? 'complete' : 'idle');
             }
-          } catch {}
+          } catch (parseErr) {
+            console.warn('Stream parse error:', parseErr);
+          }
         }
       }
     } catch (err) {
@@ -240,15 +281,24 @@ export default function Home() {
             animationPhase={animationPhase}
             onMapClick={handleMapClick}
             flat={flat}
+            activeFires={activeFires}
+            terrain={terrain}
           />
-          {county && !fireGrid && !isSimulating && (
+          {loading && loadingStatus && (
+            <div className="map-overlay-instructions animate-pulse">
+              {loadingStatus}
+            </div>
+          )}
+          {county && !loading && !fireGrid && !isSimulating && (
             <div className="map-overlay-instructions">
-              Click on the map to ignite a wildfire
+              {activeFires.length > 0
+                ? `${activeFires.length} active FIRMS hotspots detected — use sidebar to simulate, or click map`
+                : 'Click on the map to ignite a wildfire'}
             </div>
           )}
           {isSimulating && (
             <div className="map-overlay-instructions animate-pulse">
-              Fire spreading...
+              Fire spreading with terrain model...
             </div>
           )}
         </div>
@@ -258,12 +308,15 @@ export default function Home() {
           census={census}
           weather={weather}
           infrastructure={infrastructure}
+          terrain={terrain}
+          activeFires={activeFires}
           damage={damage}
           simState={simState}
           simLog={simLog}
           optimalPlan={optimalPlan}
           improvementCurve={improvementCurve}
           onStartSim={handleStartSim}
+          onStartFromHotspots={handleStartFromHotspots}
           animationPhase={animationPhase}
         />
       </div>

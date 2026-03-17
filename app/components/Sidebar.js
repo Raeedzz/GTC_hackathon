@@ -5,6 +5,8 @@ export default function Sidebar({
   census,
   weather,
   infrastructure,
+  terrain,
+  activeFires,
   damage,
   simState,
   simLog,
@@ -12,6 +14,7 @@ export default function Sidebar({
   improvementCurve,
   phase,
   onStartSim,
+  onStartFromHotspots,
   animationPhase,
 }) {
   return (
@@ -69,6 +72,65 @@ export default function Sidebar({
           </div>
           {weather.description && (
             <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>{weather.description}</p>
+          )}
+        </div>
+      )}
+
+      {/* Terrain Data */}
+      {terrain && (
+        <div className="sidebar-section">
+          <h3>Terrain Analysis</h3>
+          <div className="stat-grid">
+            <div className="stat-item">
+              <div className="stat-label">Min Elevation</div>
+              <div className="stat-value">{terrain.meta?.min_elevation}m</div>
+            </div>
+            <div className="stat-item">
+              <div className="stat-label">Max Elevation</div>
+              <div className="stat-value">{terrain.meta?.max_elevation}m</div>
+            </div>
+            <div className="stat-item">
+              <div className="stat-label">Cell Size</div>
+              <div className="stat-value">{terrain.meta?.cell_size_meters}m</div>
+            </div>
+            <div className="stat-item">
+              <div className="stat-label">Grid</div>
+              <div className="stat-value">{terrain.meta?.grid_size}x{terrain.meta?.grid_size}</div>
+            </div>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+            Elevation from USGS NED 10m via Open Topo Data. Slope &amp; fuel type derived for Rothermel spread model.
+          </p>
+        </div>
+      )}
+
+      {/* NASA FIRMS Active Fires */}
+      {activeFires && activeFires.length > 0 && (
+        <div className="sidebar-section">
+          <h3>Active Fire Detections (FIRMS)</h3>
+          <div className="stat-grid">
+            <div className="stat-item">
+              <div className="stat-label">Hotspots</div>
+              <div className="stat-value red">{activeFires.length}</div>
+            </div>
+            <div className="stat-item">
+              <div className="stat-label">Avg FRP</div>
+              <div className="stat-value amber">
+                {(activeFires.reduce((s, f) => s + (f.frp || 0), 0) / activeFires.length).toFixed(1)} MW
+              </div>
+            </div>
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+            NASA VIIRS satellite detections (last 48h). Orange markers on map.
+          </p>
+          {!damage && onStartFromHotspots && (
+            <button
+              className="btn btn-primary"
+              onClick={onStartFromHotspots}
+              style={{ marginTop: 10, width: '100%' }}
+            >
+              Simulate Fire from {activeFires.length} Hotspot{activeFires.length > 1 ? 's' : ''}
+            </button>
           )}
         </div>
       )}
@@ -133,6 +195,10 @@ export default function Sidebar({
                 ) : entry.type === 'plan_evaluated' ? (
                   <span style={{ color: 'var(--text-muted)' }}>
                     R{entry.round + 1} Plan {entry.plan_index + 1}: {entry.plan_name} → <span className="score">{entry.score}</span>
+                  </span>
+                ) : entry.type === 'error' ? (
+                  <span style={{ color: '#ff6b6b' }}>
+                    R{entry.round + 1}: {entry.message}
                   </span>
                 ) : null}
               </div>
