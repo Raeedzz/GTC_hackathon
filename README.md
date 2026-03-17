@@ -2,7 +2,23 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
-First, run the development server:
+### 1. Environment variables (required for AI simulation)
+
+Copy the example env file and add your OpenRouter API key:
+
+```bash
+cp .env.example .env.local
+```
+
+Edit `.env.local` and set:
+
+```bash
+OPENROUTER_API_KEY=sk-or-v1-xxxxxxxx
+```
+
+Get a free API key at **[OpenRouter](https://openrouter.ai/keys)** (sign up, then create a key). Without this, the "Run AI simulation" step will return 500.
+
+### 2. Run the development server
 
 ```bash
 npm run dev

@@ -134,12 +134,19 @@ export async function POST(request) {
   });
 }
 
+const AI_REQUEST_TIMEOUT_MS = 55_000; // Slightly under common server limits (e.g. Vercel 60s)
+const FALLBACK_MODEL = 'meta-llama/llama-3.2-3b-instruct:free'; // Used when primary returns empty
+// Default: Nemotron 3 Super 120B. Override with OPENROUTER_PLANNING_MODEL if needed.
 async function callNemotron(apiKey, prompt, round, retries = 1) {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    console.log(`[AI] Round ${round + 1}, attempt ${attempt + 1}/${retries + 1}...`);
+  const primaryModel = process.env.OPENROUTER_PLANNING_MODEL || 'nvidia/nemotron-3-super-120b-a12b:free';
+  const modelsToTry = [primaryModel, FALLBACK_MODEL];
+
+  for (const model of modelsToTry) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      console.log(`[AI] Round ${round + 1}, attempt ${attempt + 1}/${retries + 1}, model: ${model}`);
 
     const body = {
-      model: 'nvidia/nemotron-nano-12b-v2-vl:free',
+      model,
       messages: [
         {
           role: 'system',
@@ -148,15 +155,21 @@ async function callNemotron(apiKey, prompt, round, retries = 1) {
         { role: 'user', content: prompt },
       ],
       temperature: 0.4,
-      max_tokens: 4000,
+      max_tokens: 8192,
+      // Model still reasons internally but reasoning is not returned (saves tokens, faster response)
+      reasoning: { exclude: true },
     };
 
     console.log(`[AI] Request size: ${JSON.stringify(body).length} bytes`);
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
 
     let res;
     try {
       res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
@@ -166,6 +179,10 @@ async function callNemotron(apiKey, prompt, round, retries = 1) {
         body: JSON.stringify(body),
       });
     } catch (fetchErr) {
+      clearTimeout(timeoutId);
+      if (fetchErr.name === 'AbortError') {
+        throw new Error('AI request timed out. Try again or use a smaller scenario.');
+      }
       console.error(`[AI] Fetch error:`, fetchErr.message);
       if (attempt < retries) {
         console.log(`[AI] Retrying in 2s...`);
@@ -174,6 +191,7 @@ async function callNemotron(apiKey, prompt, round, retries = 1) {
       }
       throw fetchErr;
     }
+    clearTimeout(timeoutId);
 
     console.log(`[AI] Status: ${res.status} ${res.statusText}`);
 
@@ -221,18 +239,43 @@ async function callNemotron(apiKey, prompt, round, retries = 1) {
 
     console.log(`[AI] Model: ${data.model || 'unknown'}, Usage: ${JSON.stringify(data.usage || {})}`);
 
-    const content = data.choices?.[0]?.message?.content;
+    const msg = data.choices?.[0]?.message ?? {};
+    const rawContent = msg.content;
     const finishReason = data.choices?.[0]?.finish_reason;
+    // OpenRouter/some models return content as array of parts, e.g. [{ type: "text", text: "..." }]
+    let content = typeof rawContent === 'string'
+      ? rawContent
+      : Array.isArray(rawContent)
+        ? (rawContent.map(part => part?.text ?? '').join('') || null)
+        : null;
+    // Reasoning models (e.g. Nemotron 3 Super) may put output in reasoning when content is null (e.g. hit max_tokens)
+    if ((!content || !content.trim()) && msg.reasoning && typeof msg.reasoning === 'string') {
+      const reasoning = msg.reasoning.trim();
+      const arrayMatch = reasoning.match(/\[[\s\S]*\]/);
+      if (arrayMatch) {
+        try {
+          const parsed = JSON.parse(arrayMatch[0]);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            content = arrayMatch[0];
+            console.log(`[AI] Extracted JSON array (${parsed.length} plans) from reasoning field`);
+          }
+        } catch (_) { /* ignore */ }
+      }
+    }
     console.log(`[AI] Finish reason: ${finishReason}`);
 
-    if (!content) {
-      console.error(`[AI] No content in response. choices:`, JSON.stringify(data.choices || []));
+    if (!content || !content.trim()) {
+      if (finishReason === 'length') {
+        console.warn(`[AI] Response was cut off (length). Consider increasing max_tokens.`);
+      }
+      console.error(`[AI] No content in response. choices:`, JSON.stringify(data.choices || [], null, 2).slice(0, 800));
       if (attempt < retries) {
-        console.log(`[AI] Empty response, retrying in 3s...`);
-        await new Promise(r => setTimeout(r, 500));
+        console.log(`[AI] Empty response, retrying...`);
+        await new Promise(r => setTimeout(r, 1000));
         continue;
       }
-      throw new Error('Empty response from AI (no content after retries)');
+      console.log(`[AI] Empty response from ${model}, trying fallback model...`);
+      break; // try next model in modelsToTry
     }
 
     console.log(`[AI] Content (${content.length} chars): ${content.slice(0, 200)}...`);
@@ -248,7 +291,9 @@ async function callNemotron(apiKey, prompt, round, retries = 1) {
       }
       throw parseErr;
     }
+    }
   }
+  throw new Error('Empty response from AI (no content after retries). Set OPENROUTER_PLANNING_MODEL=meta-llama/llama-3.2-3b-instruct:free in .env.local to use a different model.');
 }
 
 function parseJsonResponse(content) {
@@ -279,6 +324,15 @@ function parseJsonResponse(content) {
     }
   }
 
+  // Truncated JSON: response was cut off mid-stream. Extract complete plan objects.
+  if (jsonStr.startsWith('[')) {
+    const plans = extractCompletePlanObjects(jsonStr);
+    if (plans.length > 0) {
+      console.log(`[PARSE] Recovered ${plans.length} complete plan(s) from truncated JSON`);
+      return plans;
+    }
+  }
+
   const objMatch = jsonStr.match(/\{[\s\S]*\}/);
   if (objMatch) {
     try {
@@ -292,6 +346,55 @@ function parseJsonResponse(content) {
 
   console.error(`[PARSE] FAILED. Content:\n${jsonStr.slice(0, 1000)}`);
   throw new Error('Could not parse AI response: ' + jsonStr.slice(0, 200));
+}
+
+/** Extract complete {...} plan objects from a truncated JSON array string like '[{...},{...},{...'. */
+function extractCompletePlanObjects(jsonStr) {
+  const plans = [];
+  let i = 0;
+  const n = jsonStr.length;
+  while (i < n) {
+    // Skip whitespace and commas between elements
+    while (i < n && /[\s,]/.test(jsonStr[i])) i++;
+    if (i >= n) break;
+    if (jsonStr[i] === ']') break;
+    if (jsonStr[i] !== '{') break;
+    const start = i;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let quote = null;
+    for (; i < n; i++) {
+      const c = jsonStr[i];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (inString) {
+        if (c === '\\') escape = true;
+        else if (c === quote) inString = false;
+        continue;
+      }
+      if (c === '"') {
+        inString = true;
+        quote = c;
+        continue;
+      }
+      if (c === '{') depth++;
+      else if (c === '}') {
+        depth--;
+        if (depth === 0) {
+          i++;
+          try {
+            plans.push(JSON.parse(jsonStr.slice(start, i)));
+          } catch (_) { /* skip malformed object */ }
+          break;
+        }
+      }
+    }
+    if (depth !== 0) break; // Incomplete object, stop
+  }
+  return plans;
 }
 
 function buildImprovementCurve(history, totalRounds) {

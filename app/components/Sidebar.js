@@ -183,7 +183,7 @@ export default function Sidebar({
                 ></div>
               </div>
               <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {simLog.length} / 5 plans evaluated
+                {simLog.length} / 3 plans evaluated
               </p>
             </>
           )}
