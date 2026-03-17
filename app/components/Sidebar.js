@@ -179,11 +179,11 @@ export default function Sidebar({
               <div className="progress-bar">
                 <div
                   className="progress-fill"
-                  style={{ width: `${(simLog.length / 50) * 100}%` }}
+                  style={{ width: `${(simLog.length / 5) * 100}%` }}
                 ></div>
               </div>
               <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {simLog.length} / 50 plans evaluated
+                {simLog.length} / 5 plans evaluated
               </p>
             </>
           )}
@@ -191,7 +191,7 @@ export default function Sidebar({
             {simLog.map((entry, i) => (
               <div key={i} className="round-log-entry">
                 {entry.type === 'round_complete' ? (
-                  <span>Round {entry.round + 1}/10 — Best: <span className="score">{entry.best_score}</span></span>
+                  <span>Round {entry.round + 1}/1 — Best: <span className="score">{entry.best_score}</span></span>
                 ) : entry.type === 'plan_evaluated' ? (
                   <span style={{ color: 'var(--text-muted)' }}>
                     R{entry.round + 1} Plan {entry.plan_index + 1}: {entry.plan_name} → <span className="score">{entry.score}</span>

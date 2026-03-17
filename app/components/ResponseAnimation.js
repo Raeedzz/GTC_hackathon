@@ -10,14 +10,11 @@ export default function useResponseAnimation(optimalPlan) {
     if (!optimalPlan) return;
     setAnimationPhase(0);
 
-    // Phase 1: Deployments at 0s
-    setTimeout(() => setAnimationPhase(1), 500);
-    // Phase 2: Evacuation at 3s
-    setTimeout(() => setAnimationPhase(2), 3000);
-    // Phase 3: Police + Medical at 6s
-    setTimeout(() => setAnimationPhase(3), 6000);
-    // Phase 4: Shelters at 9s
-    timerRef.current = setTimeout(() => setAnimationPhase(4), 9000);
+    // Fast phases — all done in ~4s
+    setTimeout(() => setAnimationPhase(1), 200);
+    setTimeout(() => setAnimationPhase(2), 1200);
+    setTimeout(() => setAnimationPhase(3), 2200);
+    timerRef.current = setTimeout(() => setAnimationPhase(4), 3200);
   }, [optimalPlan]);
 
   const resetAnimation = useCallback(() => {

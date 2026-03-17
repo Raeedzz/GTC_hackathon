@@ -455,6 +455,46 @@ html, body {
   animation: pulse 2s ease-in-out infinite;
 }
 
+/* Animated vehicles */
+.animated-vehicle {
+  background: none !important;
+  border: none !important;
+}
+
+.vehicle-icon {
+  font-size: 20px;
+  filter: drop-shadow(0 0 4px rgba(0,0,0,0.8));
+  transition: transform 0.1s;
+}
+
+.vehicle-icon.firetruck-icon { font-size: 22px; }
+.vehicle-icon.police-icon { font-size: 20px; }
+.vehicle-icon.ambulance-icon { font-size: 20px; }
+.vehicle-icon.shelter-icon {
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pulse-marker {
+  animation: markerPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes markerPulse {
+  0%, 100% { stroke-opacity: 1; fill-opacity: 0.6; }
+  50% { stroke-opacity: 0.4; fill-opacity: 0.3; }
+}
+
+.evac-zone-expand {
+  animation: zoneExpand 1s ease-out forwards;
+}
+
+@keyframes zoneExpand {
+  from { stroke-dashoffset: 100; opacity: 0; }
+  to { stroke-dashoffset: 0; opacity: 1; }
+}
+
 /* FIRMS fire marker pulse */
 .firms-fire-marker {
   animation: firePulse 1.5s ease-in-out infinite;

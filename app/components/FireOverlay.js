@@ -99,7 +99,7 @@ export default function useFireSimulation() {
 
       tick++;
       setFireGrid([...currentGrid.map(r => [...r])]);
-    }, 100);
+    }, 50);
   }, []);
 
   const reset = useCallback(() => {

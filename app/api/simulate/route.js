@@ -8,7 +8,6 @@ export async function POST(request) {
   const apiKey = process.env.OPENROUTER_API_KEY;
 
   console.log('[SIMULATE] Starting simulation for', scenario.county, 'County');
-  console.log('[SIMULATE] Damage report:', JSON.stringify(scenario.damage, null, 2).slice(0, 500));
 
   if (!apiKey) {
     console.error('[SIMULATE] No OPENROUTER_API_KEY set');
@@ -18,22 +17,30 @@ export async function POST(request) {
     });
   }
 
-  console.log('[SIMULATE] API key present, length:', apiKey.length);
-
   const encoder = new TextEncoder();
+  let controllerClosed = false;
+
   const stream = new ReadableStream({
     async start(controller) {
       function send(data) {
-        controller.enqueue(encoder.encode(JSON.stringify(data) + '\n'));
+        if (controllerClosed) return;
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(data) + '\n'));
+        } catch (e) {
+          console.warn('[SIMULATE] Send failed (controller closed):', e.message);
+          controllerClosed = true;
+        }
       }
 
       let bestPlan = null;
       let bestScore = -Infinity;
       const history = [];
-      const totalRounds = 10;
+      const totalRounds = 1;
 
       try {
         for (let round = 0; round < totalRounds; round++) {
+          if (controllerClosed) break;
+
           console.log(`[SIMULATE] === Round ${round + 1}/${totalRounds} ===`);
           send({ type: 'round_start', round, total: totalRounds });
 
@@ -45,17 +52,16 @@ export async function POST(request) {
 
           let plans = [];
           try {
-            const startTime = Date.now();
             plans = await callNemotron(apiKey, prompt, round);
-            console.log(`[SIMULATE] Round ${round + 1}: Got ${plans.length} plans in ${Date.now() - startTime}ms`);
+            console.log(`[SIMULATE] Round ${round + 1}: Got ${plans.length} plans`);
           } catch (err) {
             console.error(`[SIMULATE] Round ${round + 1} FAILED:`, err.message);
-            send({ type: 'error', round, message: 'AI call failed: ' + err.message });
+            send({ type: 'error', round, message: err.message });
             continue;
           }
 
           if (!Array.isArray(plans) || plans.length === 0) {
-            console.warn(`[SIMULATE] Round ${round + 1}: No valid plans returned`);
+            console.warn(`[SIMULATE] Round ${round + 1}: No valid plans`);
             send({ type: 'error', round, message: 'No valid plans returned' });
             continue;
           }
@@ -64,7 +70,7 @@ export async function POST(request) {
             const plan = plans[i];
             const score = scorePlan(plan, scenario);
 
-            console.log(`[SIMULATE] Round ${round + 1} Plan ${i + 1}: "${plan.strategy_name}" → score ${score}`);
+            console.log(`[SIMULATE] R${round + 1} P${i + 1}: "${plan.strategy_name}" → ${score}`);
 
             history.push({
               round,
@@ -76,7 +82,7 @@ export async function POST(request) {
             if (score > bestScore) {
               bestScore = score;
               bestPlan = plan;
-              console.log(`[SIMULATE] ★ New best! Score: ${score}, Strategy: "${plan.strategy_name}"`);
+              console.log(`[SIMULATE] ★ New best: ${score}`);
             }
 
             send({
@@ -96,12 +102,9 @@ export async function POST(request) {
             best_strategy: bestPlan?.strategy_name || 'Unknown',
             plans_evaluated: history.length,
           });
-
-          console.log(`[SIMULATE] Round ${round + 1} complete. Best so far: ${bestScore}`);
         }
 
-        console.log(`[SIMULATE] === DONE === Best score: ${bestScore}, Plans evaluated: ${history.length}`);
-        console.log(`[SIMULATE] Winning strategy: "${bestPlan?.strategy_name}"`);
+        console.log(`[SIMULATE] DONE. Best: ${bestScore}, Total plans: ${history.length}`);
 
         send({
           type: 'complete',
@@ -116,7 +119,10 @@ export async function POST(request) {
         send({ type: 'fatal_error', message: err.message });
       }
 
-      controller.close();
+      if (!controllerClosed) {
+        controllerClosed = true;
+        controller.close();
+      }
     },
   });
 
@@ -128,59 +134,121 @@ export async function POST(request) {
   });
 }
 
-async function callNemotron(apiKey, prompt, round) {
-  console.log(`[AI] Calling OpenRouter (round ${round + 1})...`);
+async function callNemotron(apiKey, prompt, round, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    console.log(`[AI] Round ${round + 1}, attempt ${attempt + 1}/${retries + 1}...`);
 
-  const body = {
-    model: 'nvidia/nemotron-3-super-120b-a12b:free',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a disaster recovery planning AI. You output ONLY valid JSON arrays of recovery plans. No markdown, no explanations, no code blocks. Just the raw JSON array.',
-      },
-      { role: 'user', content: prompt },
-    ],
-    temperature: 0.8,
-    max_tokens: 4000,
-  };
+    const body = {
+      model: 'nvidia/nemotron-3-super-120b-a12b:free',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a disaster recovery planning AI. You output ONLY valid JSON arrays of recovery plans. No markdown, no explanations, no code blocks. Just the raw JSON array.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.8,
+      max_tokens: 4000,
+    };
 
-  console.log(`[AI] Request body size: ${JSON.stringify(body).length} bytes`);
+    console.log(`[AI] Request size: ${JSON.stringify(body).length} bytes`);
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://wildfire-recovery-sim.vercel.app',
-      'X-Title': 'Wildfire Recovery Simulator',
-    },
-    body: JSON.stringify(body),
-  });
+    let res;
+    try {
+      res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://wildfire-recovery-sim.vercel.app',
+          'X-Title': 'Wildfire Recovery Simulator',
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (fetchErr) {
+      console.error(`[AI] Fetch error:`, fetchErr.message);
+      if (attempt < retries) {
+        console.log(`[AI] Retrying in 2s...`);
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      throw fetchErr;
+    }
 
-  console.log(`[AI] Response status: ${res.status}`);
+    console.log(`[AI] Status: ${res.status} ${res.statusText}`);
 
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error(`[AI] Error response:`, errText.slice(0, 500));
-    throw new Error(`OpenRouter ${res.status}: ${errText.slice(0, 300)}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error(`[AI] Error body:`, errText.slice(0, 500));
+
+      // Rate limited — wait and retry
+      if (res.status === 429 && attempt < retries) {
+        console.log(`[AI] Rate limited, waiting 5s...`);
+        await new Promise(r => setTimeout(r, 5000));
+        continue;
+      }
+
+      throw new Error(`OpenRouter ${res.status}: ${errText.slice(0, 300)}`);
+    }
+
+    const rawText = await res.text();
+    console.log(`[AI] Raw response length: ${rawText.length} chars`);
+    console.log(`[AI] Raw response preview: ${rawText.slice(0, 300)}`);
+
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      console.error(`[AI] Failed to parse response as JSON:`, rawText.slice(0, 500));
+      if (attempt < retries) {
+        console.log(`[AI] Retrying...`);
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      throw new Error('Response is not valid JSON');
+    }
+
+    // Check for API-level errors
+    if (data.error) {
+      console.error(`[AI] API error:`, JSON.stringify(data.error));
+      if (attempt < retries) {
+        console.log(`[AI] Retrying in 3s...`);
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+      throw new Error(`API error: ${data.error.message || JSON.stringify(data.error)}`);
+    }
+
+    console.log(`[AI] Model: ${data.model || 'unknown'}, Usage: ${JSON.stringify(data.usage || {})}`);
+
+    const content = data.choices?.[0]?.message?.content;
+    const finishReason = data.choices?.[0]?.finish_reason;
+    console.log(`[AI] Finish reason: ${finishReason}`);
+
+    if (!content) {
+      console.error(`[AI] No content in response. choices:`, JSON.stringify(data.choices || []));
+      if (attempt < retries) {
+        console.log(`[AI] Empty response, retrying in 3s...`);
+        await new Promise(r => setTimeout(r, 3000));
+        continue;
+      }
+      throw new Error('Empty response from AI (no content after retries)');
+    }
+
+    console.log(`[AI] Content (${content.length} chars): ${content.slice(0, 200)}...`);
+
+    try {
+      return parseJsonResponse(content);
+    } catch (parseErr) {
+      console.error(`[AI] Parse error:`, parseErr.message);
+      if (attempt < retries) {
+        console.log(`[AI] Parse failed, retrying...`);
+        await new Promise(r => setTimeout(r, 2000));
+        continue;
+      }
+      throw parseErr;
+    }
   }
-
-  const data = await res.json();
-
-  console.log(`[AI] Response model: ${data.model || 'unknown'}`);
-  console.log(`[AI] Usage: ${JSON.stringify(data.usage || {})}`);
-
-  const content = data.choices?.[0]?.message?.content;
-
-  if (!content) {
-    console.error(`[AI] Empty content. Full response:`, JSON.stringify(data).slice(0, 500));
-    throw new Error('Empty response from AI');
-  }
-
-  console.log(`[AI] Content length: ${content.length} chars`);
-  console.log(`[AI] Content preview: ${content.slice(0, 200)}...`);
-
-  return parseJsonResponse(content);
 }
 
 function parseJsonResponse(content) {
@@ -191,42 +259,39 @@ function parseJsonResponse(content) {
     jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
   }
 
-  // Try direct parse
   try {
     const parsed = JSON.parse(jsonStr);
     const result = Array.isArray(parsed) ? parsed : [parsed];
-    console.log(`[PARSE] Direct parse OK, ${result.length} plans`);
+    console.log(`[PARSE] OK: ${result.length} plans`);
     return result;
   } catch (e) {
-    console.warn(`[PARSE] Direct parse failed: ${e.message}`);
+    // noop
   }
 
-  // Try to extract JSON array from response
   const match = jsonStr.match(/\[[\s\S]*\]/);
   if (match) {
     try {
       const result = JSON.parse(match[0]);
-      console.log(`[PARSE] Array extraction OK, ${result.length} plans`);
+      console.log(`[PARSE] Array extracted: ${result.length} plans`);
       return result;
     } catch (e) {
-      console.warn(`[PARSE] Array extraction failed: ${e.message}`);
+      // noop
     }
   }
 
-  // Try to extract single JSON object
   const objMatch = jsonStr.match(/\{[\s\S]*\}/);
   if (objMatch) {
     try {
       const result = [JSON.parse(objMatch[0])];
-      console.log(`[PARSE] Object extraction OK`);
+      console.log(`[PARSE] Object extracted`);
       return result;
     } catch (e) {
-      console.warn(`[PARSE] Object extraction failed: ${e.message}`);
+      // noop
     }
   }
 
-  console.error(`[PARSE] All parsing failed. Raw content:\n${jsonStr.slice(0, 1000)}`);
-  throw new Error('Could not parse AI response as JSON: ' + jsonStr.slice(0, 200));
+  console.error(`[PARSE] FAILED. Content:\n${jsonStr.slice(0, 1000)}`);
+  throw new Error('Could not parse AI response: ' + jsonStr.slice(0, 200));
 }
 
 function buildImprovementCurve(history, totalRounds) {

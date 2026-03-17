@@ -238,9 +238,33 @@ function FireLayer({ fireGrid, bounds, terrain }) {
   return null;
 }
 
+/** Interpolate between two [lat,lng] points */
+function lerp(from, to, t) {
+  return [
+    from[0] + (to[0] - from[0]) * t,
+    from[1] + (to[1] - from[1]) * t,
+  ];
+}
+
+function animateMarkerAlongPath(marker, from, to, durationMs, onDone) {
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min((now - start) / durationMs, 1);
+    const pos = lerp(from, to, t);
+    marker.setLatLng(pos);
+    if (t < 1) {
+      requestAnimationFrame(step);
+    } else if (onDone) {
+      onDone();
+    }
+  }
+  requestAnimationFrame(step);
+}
+
 function ResponseLayer({ plan, animationPhase }) {
   const map = useMap();
   const layerRef = useRef(null);
+  const animFrameRef = useRef([]);
 
   useEffect(() => {
     if (layerRef.current) {
@@ -252,81 +276,162 @@ function ResponseLayer({ plan, animationPhase }) {
 
     const group = L.layerGroup();
 
+    // Phase 1: Firetrucks animate from stations to fire
     if (animationPhase >= 1) {
-      (plan.firetruck_deployments || []).forEach(dep => {
-        if (dep.from_station && dep.to_position) {
-          group.addLayer(L.polyline(
-            [dep.from_station, dep.to_position],
-            { color: '#ef4444', weight: 2, opacity: 0.7, dashArray: '6 4' }
-          ));
-          const marker = L.circleMarker(dep.to_position, {
-            radius: 6, color: '#ef4444', fillColor: '#ef4444', fillOpacity: 0.9, weight: 2,
+      (plan.firetruck_deployments || []).forEach((dep, idx) => {
+        if (!dep.from_station || !dep.to_position) return;
+
+        // Trail line (appears immediately, faint)
+        group.addLayer(L.polyline(
+          [dep.from_station, dep.to_position],
+          { color: '#ef4444', weight: 2, opacity: 0.3, dashArray: '6 4' }
+        ));
+
+        // Animated firetruck icon
+        const icon = L.divIcon({
+          className: 'animated-vehicle',
+          html: '<div class="vehicle-icon firetruck-icon">🚒</div>',
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+        });
+        const marker = L.marker(dep.from_station, { icon, zIndexOffset: 1000 });
+        group.addLayer(marker);
+
+        // Animate with staggered start
+        setTimeout(() => {
+          animateMarkerAlongPath(marker, dep.from_station, dep.to_position, 1200, () => {
+            // Arrived — show pulsing circle at destination
+            const pulse = L.circleMarker(dep.to_position, {
+              radius: 8, color: '#ef4444', fillColor: '#ef4444', fillOpacity: 0.6,
+              weight: 2, className: 'pulse-marker',
+            });
+            pulse.bindTooltip(dep.task || 'Firetruck deployed', { permanent: false });
+            group.addLayer(pulse);
           });
-          marker.bindTooltip(dep.task || 'Firetruck', { permanent: false });
-          group.addLayer(marker);
-        }
+        }, idx * 200);
       });
     }
 
+    // Phase 2: Evacuation zones expand + people moving along routes
     if (animationPhase >= 2) {
       (plan.evacuation_zones || []).forEach(zone => {
-        if (zone.center) {
-          group.addLayer(L.circle(zone.center, {
-            radius: zone.radius_meters || 2000,
-            color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.1, weight: 2, dashArray: '4 4',
-          }));
-        }
+        if (!zone.center) return;
+        group.addLayer(L.circle(zone.center, {
+          radius: zone.radius_meters || 2000,
+          color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.1,
+          weight: 2, dashArray: '4 4', className: 'evac-zone-expand',
+        }));
       });
 
-      (plan.evacuation_routes || []).forEach(route => {
-        if (route.from && route.to) {
-          group.addLayer(L.polyline([route.from, route.to], {
-            color: '#22c55e', weight: 3, opacity: 0.8,
-          }));
-          group.addLayer(L.circleMarker(route.to, {
-            radius: 4, color: '#22c55e', fillColor: '#22c55e', fillOpacity: 1, weight: 0,
-          }));
+      (plan.evacuation_routes || []).forEach((route, idx) => {
+        if (!route.from || !route.to) return;
+
+        // Route line
+        group.addLayer(L.polyline([route.from, route.to], {
+          color: '#22c55e', weight: 3, opacity: 0.6,
+        }));
+
+        // Animated people dots moving along route
+        for (let p = 0; p < 3; p++) {
+          const dot = L.circleMarker(route.from, {
+            radius: 3, color: '#4ade80', fillColor: '#4ade80', fillOpacity: 0.9, weight: 0,
+          });
+          group.addLayer(dot);
+
+          setTimeout(() => {
+            animateMarkerAlongPath(dot, route.from, route.to, 1500);
+          }, idx * 150 + p * 250);
         }
+
+        // Arrow at destination
+        group.addLayer(L.circleMarker(route.to, {
+          radius: 5, color: '#22c55e', fillColor: '#22c55e', fillOpacity: 1, weight: 0,
+        }));
       });
     }
 
+    // Phase 3: Police cars animate + ambulances to hospitals
     if (animationPhase >= 3) {
-      (plan.police_deployments || []).forEach(dep => {
-        if (dep.to_position) {
-          const marker = L.circleMarker(dep.to_position, {
-            radius: 5, color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.9, weight: 2,
+      (plan.police_deployments || []).forEach((dep, idx) => {
+        if (!dep.to_position) return;
+
+        if (dep.from_station) {
+          group.addLayer(L.polyline([dep.from_station, dep.to_position], {
+            color: '#3b82f6', weight: 1.5, opacity: 0.3, dashArray: '4 4',
+          }));
+
+          const icon = L.divIcon({
+            className: 'animated-vehicle',
+            html: '<div class="vehicle-icon police-icon">🚔</div>',
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
           });
-          marker.bindTooltip(dep.task || 'Police', { permanent: false });
+          const marker = L.marker(dep.from_station, { icon, zIndexOffset: 1000 });
           group.addLayer(marker);
-          if (dep.from_station) {
-            group.addLayer(L.polyline([dep.from_station, dep.to_position], {
-              color: '#3b82f6', weight: 1.5, opacity: 0.5, dashArray: '4 4',
-            }));
-          }
+
+          setTimeout(() => {
+            animateMarkerAlongPath(marker, dep.from_station, dep.to_position, 1000, () => {
+              const pulse = L.circleMarker(dep.to_position, {
+                radius: 6, color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.6,
+                weight: 2, className: 'pulse-marker',
+              });
+              pulse.bindTooltip(dep.task || 'Police deployed', { permanent: false });
+              group.addLayer(pulse);
+            });
+          }, idx * 150);
+        } else {
+          const pulse = L.circleMarker(dep.to_position, {
+            radius: 6, color: '#3b82f6', fillColor: '#3b82f6', fillOpacity: 0.8, weight: 2,
+          });
+          pulse.bindTooltip(dep.task || 'Police', { permanent: false });
+          group.addLayer(pulse);
         }
       });
 
-      (plan.hospital_assignments || []).forEach(hosp => {
-        if (hosp.hospital) {
-          const circle = L.circleMarker(hosp.hospital, {
-            radius: 10, color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.2, weight: 2,
-          });
-          circle.bindTooltip(`${hosp.name || 'Hospital'}: ${hosp.role || 'Triage'}`, { permanent: false });
-          group.addLayer(circle);
-        }
+      (plan.hospital_assignments || []).forEach((hosp, idx) => {
+        if (!hosp.hospital) return;
+
+        // Ambulance icon at hospital
+        const icon = L.divIcon({
+          className: 'animated-vehicle',
+          html: '<div class="vehicle-icon ambulance-icon">🚑</div>',
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+        });
+        const marker = L.marker(hosp.hospital, { icon, zIndexOffset: 900 });
+        group.addLayer(marker);
+
+        const circle = L.circleMarker(hosp.hospital, {
+          radius: 12, color: '#22c55e', fillColor: '#22c55e', fillOpacity: 0.15,
+          weight: 2, className: 'pulse-marker',
+        });
+        circle.bindTooltip(
+          `${hosp.name || 'Hospital'}: ${hosp.role || 'Triage'} (${hosp.capacity_pct || '?'}%)`,
+          { permanent: false }
+        );
+        group.addLayer(circle);
       });
     }
 
+    // Phase 4: Shelters appear with people arriving
     if (animationPhase >= 4) {
-      (plan.shelter_locations || []).forEach(shelter => {
-        if (shelter.position) {
-          const icon = L.divIcon({
-            className: '',
-            html: `<div style="background:rgba(245,158,11,0.9);color:#000;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:bold;white-space:nowrap;">Shelter (${shelter.capacity || '?'})</div>`,
-            iconSize: [0, 0],
-          });
-          group.addLayer(L.marker(shelter.position, { icon }));
-        }
+      (plan.shelter_locations || []).forEach((shelter, idx) => {
+        if (!shelter.position) return;
+
+        const icon = L.divIcon({
+          className: 'animated-vehicle',
+          html: `<div class="vehicle-icon shelter-icon">⛺ <span style="font-size:11px;color:#fbbf24;font-weight:bold;">${shelter.capacity || '?'}</span></div>`,
+          iconSize: [40, 24],
+          iconAnchor: [20, 12],
+        });
+        group.addLayer(L.marker(shelter.position, { icon, zIndexOffset: 800 }));
+
+        // Pulsing ring around shelter
+        group.addLayer(L.circle(shelter.position, {
+          radius: 500,
+          color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.05,
+          weight: 1, className: 'pulse-marker',
+        }));
       });
     }
 
