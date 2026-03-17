@@ -134,20 +134,20 @@ export async function POST(request) {
   });
 }
 
-async function callNemotron(apiKey, prompt, round, retries = 2) {
+async function callNemotron(apiKey, prompt, round, retries = 1) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     console.log(`[AI] Round ${round + 1}, attempt ${attempt + 1}/${retries + 1}...`);
 
     const body = {
-      model: 'nvidia/nemotron-3-super-120b-a12b:free',
+      model: 'nvidia/nemotron-nano-12b-v2-vl:free',
       messages: [
         {
           role: 'system',
-          content: 'You are a disaster recovery planning AI. You output ONLY valid JSON arrays of recovery plans. No markdown, no explanations, no code blocks. Just the raw JSON array.',
+          content: 'You are a disaster recovery planning AI. You output ONLY valid JSON arrays of recovery plans. No markdown, no explanations, no code blocks. Just the raw JSON array. Keep responses concise — short descriptions, no extra fields.',
         },
         { role: 'user', content: prompt },
       ],
-      temperature: 0.8,
+      temperature: 0.4,
       max_tokens: 4000,
     };
 
@@ -169,7 +169,7 @@ async function callNemotron(apiKey, prompt, round, retries = 2) {
       console.error(`[AI] Fetch error:`, fetchErr.message);
       if (attempt < retries) {
         console.log(`[AI] Retrying in 2s...`);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
       throw fetchErr;
@@ -184,7 +184,7 @@ async function callNemotron(apiKey, prompt, round, retries = 2) {
       // Rate limited — wait and retry
       if (res.status === 429 && attempt < retries) {
         console.log(`[AI] Rate limited, waiting 5s...`);
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, 1000));
         continue;
       }
 
@@ -202,7 +202,7 @@ async function callNemotron(apiKey, prompt, round, retries = 2) {
       console.error(`[AI] Failed to parse response as JSON:`, rawText.slice(0, 500));
       if (attempt < retries) {
         console.log(`[AI] Retrying...`);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
       throw new Error('Response is not valid JSON');
@@ -213,7 +213,7 @@ async function callNemotron(apiKey, prompt, round, retries = 2) {
       console.error(`[AI] API error:`, JSON.stringify(data.error));
       if (attempt < retries) {
         console.log(`[AI] Retrying in 3s...`);
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
       throw new Error(`API error: ${data.error.message || JSON.stringify(data.error)}`);
@@ -229,7 +229,7 @@ async function callNemotron(apiKey, prompt, round, retries = 2) {
       console.error(`[AI] No content in response. choices:`, JSON.stringify(data.choices || []));
       if (attempt < retries) {
         console.log(`[AI] Empty response, retrying in 3s...`);
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
       throw new Error('Empty response from AI (no content after retries)');
@@ -243,7 +243,7 @@ async function callNemotron(apiKey, prompt, round, retries = 2) {
       console.error(`[AI] Parse error:`, parseErr.message);
       if (attempt < retries) {
         console.log(`[AI] Parse failed, retrying...`);
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 500));
         continue;
       }
       throw parseErr;
